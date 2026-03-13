@@ -2,10 +2,15 @@ package logger
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"time"
 
-	"github.com/muhriddinsalohiddin/pkg/util"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 )
 
 // Field ...
@@ -22,7 +27,24 @@ var (
 	Bool = zap.Bool
 	// Any ...
 	Any = zap.Any
+	// Duration ...
+	Duration = zap.Duration
+	// Int64 ...
+	Int64 = zap.Int64
 )
+
+// Proto returns a Field that serializes a protobuf message as proper JSON
+// instead of Go's default proto text format.
+func Proto(key string, msg proto.Message) Field {
+	if msg == nil {
+		return zap.Any(key, nil)
+	}
+	b, err := protojson.Marshal(msg)
+	if err != nil {
+		return zap.String(key, fmt.Sprintf("%v", msg))
+	}
+	return zap.Any(key, json.RawMessage(b))
+}
 
 // Logger ...
 type LoggerI interface {
@@ -42,6 +64,11 @@ type LoggerI interface {
 	DPanicWithCtx(ctx context.Context, msg string, fields ...Field)
 	PanicWithCtx(ctx context.Context, msg string, fields ...Field)
 	FatalWithCtx(ctx context.Context, msg string, fields ...Field)
+
+	// Timer starts a timer and returns a function that logs the elapsed duration when called.
+	// Usage: done := log.Timer("db_query"); defer done()
+	Timer(msg string, fields ...Field) func()
+	TimerWithCtx(ctx context.Context, msg string, fields ...Field) func()
 }
 
 type loggerImpl struct {
@@ -99,38 +126,54 @@ func (l *loggerImpl) Fatal(msg string, fields ...Field) {
 }
 
 func (l *loggerImpl) DebugWithCtx(ctx context.Context, msg string, fields ...Field) {
-	fields = append(fields, String(l.requestIdKey, util.GetRequestId(ctx, l.requestIdKey)))
+	fields = append(fields, String(l.requestIdKey, l.getRequestId(ctx, l.requestIdKey)))
 	l.zap.Debug(msg, fields...)
 }
 
 func (l *loggerImpl) InfoWithCtx(ctx context.Context, msg string, fields ...Field) {
-	fields = append(fields, String(l.requestIdKey, util.GetRequestId(ctx, l.requestIdKey)))
+	fields = append(fields, String(l.requestIdKey, l.getRequestId(ctx, l.requestIdKey)))
 	l.zap.Info(msg, fields...)
 }
 
 func (l *loggerImpl) WarnWithCtx(ctx context.Context, msg string, fields ...Field) {
-	fields = append(fields, String(l.requestIdKey, util.GetRequestId(ctx, l.requestIdKey)))
+	fields = append(fields, String(l.requestIdKey, l.getRequestId(ctx, l.requestIdKey)))
 	l.zap.Warn(msg, fields...)
 }
 
 func (l *loggerImpl) ErrorWithCtx(ctx context.Context, msg string, fields ...Field) {
-	fields = append(fields, String(l.requestIdKey, util.GetRequestId(ctx, l.requestIdKey)))
+	fields = append(fields, String(l.requestIdKey, l.getRequestId(ctx, l.requestIdKey)))
 	l.zap.Error(msg, fields...)
 }
 
 func (l *loggerImpl) DPanicWithCtx(ctx context.Context, msg string, fields ...Field) {
-	fields = append(fields, String(l.requestIdKey, util.GetRequestId(ctx, l.requestIdKey)))
+	fields = append(fields, String(l.requestIdKey, l.getRequestId(ctx, l.requestIdKey)))
 	l.zap.DPanic(msg, fields...)
 }
 
 func (l *loggerImpl) PanicWithCtx(ctx context.Context, msg string, fields ...Field) {
-	fields = append(fields, String(l.requestIdKey, util.GetRequestId(ctx, l.requestIdKey)))
+	fields = append(fields, String(l.requestIdKey, l.getRequestId(ctx, l.requestIdKey)))
 	l.zap.Panic(msg, fields...)
 }
 
 func (l *loggerImpl) FatalWithCtx(ctx context.Context, msg string, fields ...Field) {
-	fields = append(fields, String(l.requestIdKey, util.GetRequestId(ctx, l.requestIdKey)))
+	fields = append(fields, String(l.requestIdKey, l.getRequestId(ctx, l.requestIdKey)))
 	l.zap.Fatal(msg, fields...)
+}
+
+func (l *loggerImpl) Timer(msg string, fields ...Field) func() {
+	start := time.Now()
+	return func() {
+		fields = append(fields, Duration("duration", time.Since(start)))
+		l.zap.Info(msg, fields...)
+	}
+}
+
+func (l *loggerImpl) TimerWithCtx(ctx context.Context, msg string, fields ...Field) func() {
+	start := time.Now()
+	return func() {
+		fields = append(fields, String(l.requestIdKey, l.getRequestId(ctx, l.requestIdKey)), Duration("duration", time.Since(start)))
+		l.zap.Info(msg, fields...)
+	}
 }
 
 // GetNamed ...
@@ -150,7 +193,8 @@ func WithFields(l LoggerI, fields ...Field) LoggerI {
 	switch v := l.(type) {
 	case *loggerImpl:
 		return &loggerImpl{
-			zap: v.zap.With(fields...),
+			zap:          v.zap.With(fields...),
+			requestIdKey: v.requestIdKey,
 		}
 	default:
 		l.Info("logger.WithFields: invalid logger type")
@@ -167,4 +211,21 @@ func Cleanup(l LoggerI) error {
 		l.Info("logger.Cleanup: invalid logger type")
 		return nil
 	}
+}
+
+func (l *loggerImpl) getRequestId(ctx context.Context, key string) string {
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		arr := md.Get(key)
+		if len(arr) > 0 {
+			return arr[0]
+		}
+	}
+
+	if id, ok := ctx.Value(key).(string); ok {
+		return id
+	}
+
+	l.Error("Request_id not found in context", String("key", key), Any("ctx", ctx))
+
+	return ""
 }
