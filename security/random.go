@@ -32,7 +32,7 @@ func GenerateRandomCode(n int) (string, error) {
 	}
 
 	code := ""
-	for i := 0; i < n; i++ {
+	for i := range n {
 		code = code + fmt.Sprintf("%02d", b[i]%100)
 	}
 
@@ -48,7 +48,7 @@ func GenerateRandomStringByPool(n int, pool string) (string, error) {
 		return "", err
 	}
 
-	for i := 0; i < n; i++ {
+	for i := range n {
 		b[i] = pool[(b[i])%l]
 	}
 

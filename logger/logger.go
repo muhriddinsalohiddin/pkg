@@ -8,7 +8,9 @@ import (
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 )
@@ -69,6 +71,12 @@ type LoggerI interface {
 	// Usage: done := log.Timer("db_query"); defer done()
 	Timer(msg string, fields ...Field) func()
 	TimerWithCtx(ctx context.Context, msg string, fields ...Field) func()
+
+	// HandleError
+	HandleProtoError(err error, message string, req proto.Message, code codes.Code, reqId string) error
+	HandleError(err error, message string, req any, code codes.Code, reqId string) error
+	HandleProtoErrorCtx(ctx context.Context, err error, message string, req proto.Message, code codes.Code) error
+	HandleErrorCtx(ctx context.Context, err error, message string, req any, code codes.Code) error
 }
 
 type loggerImpl struct {
@@ -176,6 +184,30 @@ func (l *loggerImpl) TimerWithCtx(ctx context.Context, msg string, fields ...Fie
 	}
 }
 
+func (l *loggerImpl) HandleProtoError(err error, message string, req proto.Message, code codes.Code, reqId string) error {
+	if err == nil {
+		return status.Error(code, message)
+	}
+	l.Error(message, Error(err), Proto("req", req), String(l.requestIdKey, reqId))
+	return status.Error(code, message+" "+err.Error())
+}
+
+func (l *loggerImpl) HandleError(err error, message string, req any, code codes.Code, reqId string) error {
+	if err == nil {
+		return status.Error(code, message)
+	}
+	l.Error(message, Error(err), Any("req", req), String(l.requestIdKey, reqId))
+	return status.Error(code, message+" "+err.Error())
+}
+
+func (l *loggerImpl) HandleProtoErrorCtx(ctx context.Context, err error, message string, req proto.Message, code codes.Code) error {
+	return l.HandleProtoError(err, message, req, code, l.getRequestId(ctx, l.requestIdKey))
+}
+
+func (l *loggerImpl) HandleErrorCtx(ctx context.Context, err error, message string, req any, code codes.Code) error {
+	return l.HandleError(err, message, req, code, l.getRequestId(ctx, l.requestIdKey))
+}
+
 // GetNamed ...
 func GetNamed(l LoggerI, name string) LoggerI {
 	switch v := l.(type) {
@@ -224,8 +256,6 @@ func (l *loggerImpl) getRequestId(ctx context.Context, key string) string {
 	if id, ok := ctx.Value(key).(string); ok {
 		return id
 	}
-
-	l.Error("Request_id not found in context", String("key", key), Any("ctx", ctx))
 
 	return ""
 }
